@@ -1,0 +1,57 @@
+# Runs ON THE GPU BOX, not on the Mac.
+#   docker compose -f docker/gpu-compose.yml up -d
+#
+# Why containers rather than a conda env on the box: CUDA-versioned wheels never
+# touch RAG_VENV, and the embedder becomes a network dependency from day one --
+# which is what it will be in production anyway. Phase 11's degradation testing
+# is only honest if the embedder was always a remote call.
+#
+# Ports are bound to 0.0.0.0 so the Mac can reach them. Put this behind a VPN or
+# an SSH tunnel -- TEI has no auth.
+
+services:
+  embedder:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    container_name: tei-embedder
+    command:
+      - --model-id=BAAI/bge-m3
+      - --max-client-batch-size=256
+      - --max-batch-tokens=32768
+      - --auto-truncate
+    ports:
+      - "8080:80"
+    volumes:
+      - hf_cache:/data
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Not used until Phase 6 -- defined here so the box is provisioned once.
+  reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    container_name: tei-reranker
+    profiles: ["rerank"]
+    command:
+      - --model-id=BAAI/bge-reranker-v2-m3
+      - --max-client-batch-size=128
+      - --auto-truncate
+    ports:
+      - "8081:80"
+    volumes:
+      - hf_cache:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf_cache:

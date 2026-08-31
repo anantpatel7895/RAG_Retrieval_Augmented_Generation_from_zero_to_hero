@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- RAG project -------------------------------------------------------------
+# Corpus lives in the repo but NEVER in git: ~1 GB of binaries, and git keeps
+# every version of every blob forever. One accidental commit bloats the repo
+# permanently. The manifest is the reproducible part -- it stays tracked.
+# NOTE: exclude the CONTENTS (data/raw/*), not the directory (data/raw/). Git
+# cannot re-include a file whose parent directory is excluded, so `data/raw/`
+# plus `!data/raw/manifest.jsonl` silently keeps the manifest ignored.
+data/raw/*
+!data/raw/manifest.jsonl
+data/interim/
+data/processed/
+
+# Eval run artifacts and cost logs: high-churn, regenerable.
+runs/
+eval/runs/
+
+# Local model weights / HF cache if anything lands here
+models/
+.cache/
