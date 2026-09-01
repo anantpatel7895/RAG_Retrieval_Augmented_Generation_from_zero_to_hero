@@ -1,8 +1,19 @@
 # HTML vs PDF: what each format gives you, what it destroys, and what it costs to fix
 
-Foundation document for [Phase 2](phases/phase-02.md). Every number here is measured
-on our own corpus — mostly on JPMorgan's FY2025 10-K (12.9 MB, 378,295 tokens of
-text, 679 tables) and on a clean digital PDF.
+Foundation document for [Phase 2](phases/phase-02.md).
+
+> **Every number here is reproducible.** The research lives in
+> **[`notebooks/02_parsing_html_vs_pdf.ipynb`](../notebooks/02_parsing_html_vs_pdf.ipynb)**
+> and the measurement logic in
+> [`rag/ingest/format_probe.py`](../rag/ingest/format_probe.py) (tested in
+> `tests/test_format_probe.py`). Re-run the notebook to regenerate anything below.
+>
+> This document was originally written from ad-hoc shell scripts, which made its
+> numbers unverifiable and frozen. That is now the standing rule: **research happens
+> in a notebook, logic lives in `rag/`, and the document cites the notebook.**
+
+Measurements are on JPMorgan's FY2025 10-K (12.9 MB, 378,295 tokens of text, 679
+tables) and on 55 HTML/PDF pairs covering 14 banks × 4 fiscal years.
 
 ---
 
@@ -51,7 +62,7 @@ most under-exploited signal in financial RAG.
 
 ```
 <td> cells (paired)         22,610
-<td .../> self-closing      37,738     ← 63% of all cells are empty spacers
+<td .../> self-closing      37,738     <- 62% of all cells are empty spacers
 cells containing only a number  10,579
 ```
 
@@ -67,15 +78,24 @@ Ask *"how many dollar amounts are in this filing?"* and strip tags to text:
 | Naive — every tag → space | 328 (**10%**) | 3,004 |
 | Inline-aware — inline tags → `''`, block tags → space | 780 (**23%**) | 2,552 |
 
-The inline-tag fix helps and still leaves 77% broken. Why? Because:
+The inline-tag fix roughly doubles recovery and still leaves 77% broken. Why? Because:
 
 ```
 cells containing ONLY '$'                     2,922
 '$' cell immediately followed by number cell  2,552   (87% of them)
 ```
 
-**The currency symbol occupies its own table cell.** The 2,552 figure matches the
-unrecovered count exactly — the mechanism is confirmed, not inferred.
+**The currency symbol occupies its own table cell.** And note that
+`dollar_cell_then_number` (2,552) equals the inline-aware `split` count (2,552)
+**exactly** — every amount that text extraction fails to recover is one whose `$`
+sits in a separate cell. The mechanism is proven, not inferred.
+
+> *A correction on this table.* An intermediate draft reported 636/19% for the
+> inline-aware row and blamed HTML entities. That was wrong: those figures came from
+> measuring the **corrupt** copy of the file described in §8. Re-measured against the
+> verified file, the original 780/23% is correct. Fixing a right number using bad
+> data is a nastier failure than the original bug — and the reason `rag corpus
+> verify` now runs before any measurement.
 
 > **This is not fixable by text processing.** No regex, no whitespace normalization,
 > no tag heuristic can reunite `$` with its value, because they are in different
@@ -111,7 +131,9 @@ heading and reading order must be reconstructed from geometry.
 
 ### 3b. Even a good layout model gets it wrong
 
-PyMuPDF's table detection on a clean, modern, digital PDF:
+PyMuPDF's table detection on a clean, born-digital PDF (this example is from a
+technical handbook, not a filing — it illustrates the mechanism, and 3c has the
+on-domain numbers):
 
 ```
 ['P', 'art', '', '', 'What you will learn', '']
@@ -156,9 +178,12 @@ detects in the PDF:
 | BNY Mellon FY2025 | 359 | 0 | **0%** |
 | American Express FY2022 | 116 | 0 | **0%** |
 
-**Median recovery across 55 pairs is roughly 15%.** The same parser, on the same
-document type, in the same industry, ranges from **0% to 85%** depending only on who
-published the file.
+Across all 55 pairs: **median 14.4%, range 0% to 85.4%.** As company means: **1.1%
+(BNY Mellon) to 62.3% (Truist).** In absolute terms the HTML declares **19,849**
+tables and PDF extraction finds **4,051** of them.
+
+The same parser, on the same document type, in the same industry, varies by more than
+an order of magnitude depending only on who published the file.
 
 That variance is the most important number in this document. It means:
 - A single parser choice cannot be validated on a sample — it must be measured per publisher
@@ -258,7 +283,33 @@ main argument for adding annual-report PDFs rather than any other PDF source.
 
 ---
 
-## 8. On measurement — three wrong attempts at one number
+## 8. Integrity: the check that should have existed from day one
+
+Building the notebook surfaced a corrupt file. One 10-K was **19,075,544 bytes on
+disk against 12,927,325 recorded in the manifest** — caught only because a derived
+ratio came out at 7.9% instead of 11.7% and the discrepancy was chased.
+
+The manifest had stored a sha256 and byte count for **every** document since the
+first fetch. Nothing had ever checked them.
+
+`rag corpus verify` now re-hashes the corpus against the manifest:
+
+```
+120 documents in manifest
+  verified            120
+  missing on disk       0
+  size mismatch         0
+  checksum mismatch     0
+```
+
+**Run it after any fetch and before trusting any measurement.** A file that changes
+after the manifest is written makes every downstream number silently wrong while the
+manifest continues to look authoritative — and 119 of 120 files being correct is
+exactly what makes that dangerous.
+
+---
+
+## 9. On measurement — three wrong attempts at one number
 
 The `$`-separation figure took three tries, and the failures are as instructive as
 the result:
@@ -281,7 +332,7 @@ plausible-looking wrong.
 
 ---
 
-## 9. Corpus status
+## 10. Corpus status
 
 ```
             docs        MB       tokens     pages
@@ -294,7 +345,7 @@ TOTAL        120     1,382   28,499,510    12,529     → 71,248 chunks @ 400 to
 truth for scoring PDF extraction, so Phase 2's parser bake-off is quantitative rather
 than impressionistic — no hand-labelling required.
 
-## 10. Open items
+## 11. Open items
 
 - [x] ~~Add annual-report PDFs~~ — done via EDGAR form **ARS**, 55 PDFs. They are
       hosted on SEC, so the existing polite fetcher handles them
@@ -303,9 +354,10 @@ than impressionistic — no hand-labelling required.
       Cheap, and no other corpus format offers it
 - [ ] **Implement grid-aware table extraction** (problem 2) — the only fix for the
       `$` problem, and the prerequisite for the dual representation in problem 5
-- [ ] **Extend the profiler to PDFs** — empty-page ratio and detected-table recovery
-      vs the HTML pair, so extraction quality is a tracked metric rather than a
-      one-off measurement
+- [x] ~~Extend the profiler to PDFs~~ — `rag/ingest/format_probe.py` provides
+      `pdf_probe` and `table_recovery`; results cached to `data/interim/`
+- [ ] **Wire recovery into `rag corpus profile`** so extraction quality is tracked on
+      every corpus change, not measured once
 - [ ] **Regulatory PDFs still missing** — RBI is bot-protected (a plain fetch returns
       a 46 KB CAPTCHA page); OCC's listing page is JS-rendered. Both need a browser
       session or manual download. Lower priority now that ARS supplies the hard case

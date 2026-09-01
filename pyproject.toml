@@ -56,4 +56,8 @@ module = ["fitz.*", "qdrant_client.*", "sentence_transformers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Docstring examples are executable documentation: an example that drifts from the
+# code fails the suite. This already caught a wrong expected value in
+# format_probe.strip_naive's docstring.
+addopts = "--doctest-modules"
+testpaths = ["tests", "rag"]

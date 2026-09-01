@@ -128,6 +128,61 @@ def corpus_stats() -> None:
     typer.echo("  scales as D^2/c — long documents dominate. See NUMBERS.md.\n")
 
 
+@corpus.command("verify")
+def corpus_verify() -> None:
+    """Re-hash every file on disk against the manifest.
+
+    The manifest has recorded a sha256 and byte count for every document since the
+    first fetch, and nothing ever checked them. That is a gap, not a detail: a file
+    that changes on disk after the manifest is written makes every downstream number
+    -- token counts, chunk counts, capacity math -- silently wrong, while the
+    manifest continues to look authoritative.
+
+    Run this after any fetch, and before trusting a measurement.
+    """
+    from rag.schema import sha256_file
+
+    path = settings.raw_dir / "manifest.jsonl"
+    if not path.exists():
+        typer.echo(f"no manifest at {path}")
+        raise typer.Exit(1)
+
+    rows = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    missing, size_bad, hash_bad, ok = [], [], [], 0
+
+    for r in rows:
+        p = Path(r["path"])
+        if not p.exists():
+            missing.append(r["doc_id"])
+            continue
+        actual = p.stat().st_size
+        if actual != (r.get("bytes") or -1):
+            size_bad.append((r["doc_id"], r.get("bytes"), actual))
+            continue
+        if r.get("checksum") and sha256_file(str(p)) != r["checksum"]:
+            hash_bad.append(r["doc_id"])
+            continue
+        ok += 1
+
+    typer.echo(f"\n{len(rows)} documents in manifest")
+    typer.echo(f"  verified          {ok:>5}")
+    typer.echo(f"  missing on disk   {len(missing):>5}")
+    typer.echo(f"  size mismatch     {len(size_bad):>5}")
+    typer.echo(f"  checksum mismatch {len(hash_bad):>5}")
+
+    for doc_id, expected, actual in size_bad[:20]:
+        typer.echo(f"    {doc_id:44} manifest {expected:>12,}  disk {actual:>12,}")
+    for doc_id in missing[:10]:
+        typer.echo(f"    MISSING  {doc_id}")
+    for doc_id in hash_bad[:10]:
+        typer.echo(f"    HASH     {doc_id}")
+
+    if missing or size_bad or hash_bad:
+        typer.echo("\nRe-fetch the affected files: delete them and run `rag corpus fetch`.")
+        raise typer.Exit(1)
+    typer.echo("\nall documents match the manifest.\n")
+
+
 @corpus.command("profile")
 def corpus_profile() -> None:
     """Measure the corpus before deciding how to process it (Step 0.7).
