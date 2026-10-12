@@ -17,7 +17,8 @@
 | [docs/DATA.md](docs/DATA.md) | What the corpus **is** — units, what a 10-K contains, every size figure derived |
 | [docs/PARSING.md](docs/PARSING.md) | HTML vs PDF — what each format destroys, problems → solutions → cost. Phase 2 foundation |
 | [NUMBERS.md](NUMBERS.md) | Every formula in the project, with worked examples |
-| [question_answer.md](question_answer.md) | Running Q&A log — the real test of whether a step landed |
+| [question_answer.md](question_answer.md) | Running Q&A log — recall practice for what you'd be *asked* |
+| [docs/LESSONS.md](docs/LESSONS.md) | Transferable principles, each with the incident that produced it — judgment you'd be *burned by* |
 | `docs/decisions/` | One ADR per significant choice |
 | `docs/design/` | The five system-design exercise write-ups |
 

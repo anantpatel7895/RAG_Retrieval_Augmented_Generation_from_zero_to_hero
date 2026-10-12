@@ -29,7 +29,13 @@ from collections.abc import Sequence
 from typing import Literal, Protocol, runtime_checkable
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from rag.config import Settings, settings
 from rag.embed.registry import ModelSpec, get_spec
@@ -118,8 +124,19 @@ class TEIProvider(_Base):
         timeout = 300.0 if role == "ingest" else 10.0
         self.client = httpx.Client(base_url=self.base_url, timeout=timeout)
 
+    # Retry only what is plausibly transient. `ConnectError` is deliberately
+    # EXCLUDED: a refused connection means nothing is listening, and the host will
+    # not start listening within a 20-second backoff. Retrying it turned a
+    # one-character URL mistake into 30 seconds of exponential backoff and a wall
+    # of stack frames -- slow failure is worse than fast failure, because it hides
+    # the cause. Timeouts, read errors and 5xx are the transient cases.
     @retry(
-        retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
+        retry=retry_if_exception_type(
+            (httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError)
+        )
+        | retry_if_exception(
+            lambda e: isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500
+        ),
         wait=wait_exponential(multiplier=1, min=1, max=20),
         stop=stop_after_attempt(5),
         reraise=True,

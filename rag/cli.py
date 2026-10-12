@@ -244,6 +244,62 @@ def corpus_profile() -> None:
     typer.echo(f"  companies with ≥2 years: {full}/{len(by_co)}\n")
 
 
+index_app = typer.Typer(no_args_is_help=True, help="Build and query the vector index")
+app.add_typer(index_app, name="index")
+
+
+@index_app.command("build")
+def index_build(
+    limit: int = typer.Option(0, help="Only the first N documents (0 = all)"),
+    recreate: bool = typer.Option(False, help="Drop and rebuild the collection first"),
+    batch: int = typer.Option(256, help="Chunks embedded/upserted per call"),
+) -> None:
+    """Run the Phase 0 pipeline: parse -> chunk -> embed -> upsert."""
+    from rag.pipeline.naive import ingest
+
+    typer.echo(f"provider={settings.embed_provider}  model={settings.embed_model}")
+    if settings.embed_provider == "stub":
+        typer.secho(
+            "  stub embedder: vectors are deterministic noise. This proves PLUMBING, "
+            "not quality.",
+            fg="yellow",
+        )
+
+    r = ingest(limit or None, batch=batch, recreate=recreate, progress=typer.echo)
+
+    typer.echo(f"\nrun {r['run_id']}")
+    typer.echo(f"  documents        {r['documents']:>8,}   failed {r['failed']}")
+    typer.echo(f"  chunks           {r['chunks']:>8,}")
+    typer.echo(f"  points written   {r['points_written']:>8,}")
+    typer.echo(f"  elapsed          {r['seconds']:>8}s   ({r['chunks_per_sec']} chunks/s)")
+    for f in r["failures"][:10]:
+        typer.secho(f"    FAILED {f['doc_id']}: {f['error']}", fg="red")
+
+
+@index_app.command("info")
+def index_info() -> None:
+    """Collection stats and which payload indexes exist."""
+    from rag.index.qdrant_store import QdrantStore
+
+    for k, v in QdrantStore().info().items():
+        typer.echo(f"  {k:20} {v}")
+
+
+@index_app.command("search")
+def index_search(
+    query: str = typer.Argument(..., help="Natural-language query"),
+    limit: int = typer.Option(5, help="Results to return"),
+) -> None:
+    """Search the index."""
+    from rag.pipeline.naive import search
+
+    if settings.embed_provider == "stub":
+        typer.secho("  stub embedder: these rankings are meaningless.", fg="yellow")
+    for i, hit in enumerate(search(query, limit=limit), 1):
+        typer.echo(f"\n{i}. score={hit['score']:.4f}  {hit['doc_id']}  ({hit['doc_type']})")
+        typer.echo(f"   {hit['text'][:220]}")
+
+
 @app.command()
 def config() -> None:
     """Print resolved settings."""

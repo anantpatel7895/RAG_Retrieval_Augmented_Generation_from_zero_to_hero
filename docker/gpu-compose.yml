@@ -6,52 +6,89 @@
 # which is what it will be in production anyway. Phase 11's degradation testing
 # is only honest if the embedder was always a remote call.
 #
-# Ports are bound to 0.0.0.0 so the Mac can reach them. Put this behind a VPN or
-# an SSH tunnel -- TEI has no auth.
+# Ports are bound to 0.0.0.0 so the Mac can reach them. TEI has no auth -- keep
+# this on a private network or behind an SSH tunnel.
+#
+# ---------------------------------------------------------------------------
+# THIS BOX IS SHARED. Measured 2026-09-02 with nvidia-smi:
+#
+#   GPU 0  A10 23,028 MiB  --  20,505 MiB held by someone else's vLLM engine
+#                              ~2.5 GB free: NOT OURS, do not touch
+#   GPU 1  A10 23,028 MiB  --   9,187 MiB held by our own aml_sml_env process
+#                              ~13.8 GB free: this is the one we use
+#
+# Hence `device_ids: ['1']` below rather than `count: 1`. With `count`, Docker
+# picks a device for you -- in practice GPU 0 -- and TEI would try to load onto
+# the 2.5 GB that is left there, either OOMing or evicting a colleague's job.
+# Pin the device explicitly; never let the scheduler guess on a shared box.
+#
+# Memory budget on GPU 1 (~13.8 GB free):
+#   BGE-M3          fp16 weights ~1.2 GB  + activations
+#   bge-reranker    fp16 weights ~1.2 GB  + activations  (Phase 6 only)
+#   max-batch-tokens is the activation knob -- 16384 is deliberately modest
+#   because we are sharing this GPU with our own 9.2 GB process.
+# ---------------------------------------------------------------------------
+#
+# IMAGE TAG: TEI ships per-architecture images and the default tag is NOT generic.
+#   cpu-<v>       CPU only
+#   turing-<v>    T4, RTX 2000            (sm75)
+#   <v>           A100, A30               (sm80)  <- the bare tag, NOT ours
+#   86-<v>        A10, A10G, A40, RTX 3000 (sm86) <- OURS
+#   89-<v>        L4, L40                 (sm89)
+#   hopper-<v>    H100                    (sm90)
+# The A10 is sm86, so the tag needs the `86-` prefix. Running the bare tag on an
+# A10 either fails to start or silently falls back to a slow kernel path.
+# Check for a newer version before pinning:
+#   crane ls ghcr.io/huggingface/text-embeddings-inference | grep '^86-'
+
+x-tei: &tei
+  image: ghcr.io/huggingface/text-embeddings-inference:86-1.5
+  restart: unless-stopped
+  volumes:
+    - hf_cache:/data # model downloads survive container restarts
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["1"] # NOT `count` -- see the note above
+            capabilities: [gpu]
 
 services:
   embedder:
-    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    <<: *tei
     container_name: tei-embedder
     command:
       - --model-id=BAAI/bge-m3
-      - --max-client-batch-size=256
-      - --max-batch-tokens=32768
-      - --auto-truncate
+      - --dtype=float16
+      - --max-client-batch-size=64
+      - --max-batch-tokens=16384
+      - --auto-truncate # 8192-token limit; our chunks are ~400, so this is a guard
     ports:
       - "8080:80"
-    volumes:
-      - hf_cache:/data
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20 # first boot downloads ~2.3 GB of weights
+      start_period: 300s
 
   # Not used until Phase 6 -- defined here so the box is provisioned once.
+  # Behind a profile so it does not consume GPU 1 memory during Phases 0-5.
   reranker:
-    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    <<: *tei
     container_name: tei-reranker
     profiles: ["rerank"]
     command:
       - --model-id=BAAI/bge-reranker-v2-m3
-      - --max-client-batch-size=128
+      - --dtype=float16
+      - --max-client-batch-size=32
+      - --max-batch-tokens=8192
       - --auto-truncate
     ports:
       - "8081:80"
-    volumes:
-      - hf_cache:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
 volumes:
   hf_cache:
