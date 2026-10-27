@@ -25,9 +25,9 @@ queries = {
 K, EF = 3, 4
 for text, qd in queries.items():
     q = vec(qd)
-    print(f"\n\n=== QUERY: '{text}'  (k={K}, ef={EF}) ===")
+    print(f"\n\n=== QUERY: '{text}'  (k={K}, efSearch={EF}) ===")
     idx.eval_log = []
-    res = idx.search(q, k=K, ef=EF, trace=False)
+    res = idx.search(q, k=K, efSearch=EF, trace=False)
     log = idx.eval_log; idx.eval_log = None
     for layer in sorted({l for l, _, _ in log}, reverse=True):
         seen = []

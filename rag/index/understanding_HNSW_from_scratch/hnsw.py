@@ -15,7 +15,10 @@ class HNSW:
         - trace: If True, enables detailed logging of the construction and search processes.    
         - entry: The entry point of the graph (the node with the highest level).
         - vecs: List of vectors corresponding to the nodes in the graph.
-        - levels: List of maximum levels for each node.
+        - levels: 
+            List of maximum levels for each node.
+            example: levels[i] gives the maximum level of node i.
+
         - graph: A list of dictionaries representing the graph structure. Each dictionary corresponds to a layer and maps node indices to their neighbors.
         - dist_calls: Counter for the number of distance calculations
         - eval_log: Optional list to log the evaluation of nodes during search (for debugging). 
@@ -27,7 +30,7 @@ class HNSW:
         self.rng = random.Random(seed)
         self.vecs = []                 # node id -> vector
         self.levels = []               # node id -> max layer
-        self.graph = []                # graph[layer][node] -> list of neighbors
+        self.graph = []                # graph[layer][node] -> list of neighbors list of dictionaries
         self.entry = None
         self.names = names
         self.trace = trace
@@ -36,12 +39,25 @@ class HNSW:
         self.last_draw = None   # (U, raw) from the most recent random_level(), for the trace
 
     # ---------- helpers ----------
-    def nm(self, i):
+    def name(self, i):
+        """Return the name of node i, or its index as a string if no names are provided."""
         return self.names[i] if self.names else str(i)
 
-    def d(self, a, b):
+    def distance(self, a, b, tag:str=""):
+        """Compute the Euclidean distance between vectors a and b, and increment the distance call counter.
+        Parameters:
+        - a: First vector.
+        - b: Second vector.
+        - tag: Optional "name of func it is called from".
+        Returns:
+        - The Euclidean distance between vectors a and b.
+        """
+        
         self.dist_calls += 1
-        return float(np.linalg.norm(a - b))
+
+        d = float(np.linalg.norm(a - b))
+        self.log(f"      distance calls: {a} <-> {b}  {d:.5f}, called from {tag}")
+        return d
 
     def log(self, *a):
         if self.trace:
@@ -54,14 +70,29 @@ class HNSW:
         return int(raw)
 
     # ---------- core: search one layer ----------
-    def search_layer(self, q, eps, ef, layer, tag=""):
-        visited = set(eps)
+    def search_layer(self, q, entry_points, ef, layer, tag=""):
+        """
+        Search for the nearest neighbors of query vector q in a specific layer of the graph.
+        parameters:
+        - q: The query vector.
+        - entry_points: A list of entry points (node indices) to start the search from.
+        - ef: The size of the dynamic list for the nearest neighbors during the search.
+        - layer: The layer of the graph to search in.
+        - tag: Optional string for logging purposes.
+
+        The function is the same everywhere, but ef changes its behavior:
+            ef = 1 is the greedy descent on the upper layers.
+            ef = efConstruction is the neighbour search while building.
+            ef = efSearch is the final search on layer 0 at query time.
+        """
+        visited = set(entry_points)
         cand, best = [], []            # cand: min-heap, best: max-heap (neg dist)
-        for e in eps:
-            de = self.d(q, self.vecs[e])
+        for e in entry_points:
+            de = self.distance(q, self.vecs[e])
             if self.eval_log is not None: self.eval_log.append((layer, e, de))
             heapq.heappush(cand, (de, e))
             heapq.heappush(best, (-de, e))
+
         while cand:
             dc, c = heapq.heappop(cand)
             if dc > -best[0][0] and len(best) >= ef:
@@ -70,7 +101,7 @@ class HNSW:
                 if nb in visited:
                     continue
                 visited.add(nb)
-                dn = self.d(q, self.vecs[nb])
+                dn = self.distance(q, self.vecs[nb])
                 if self.eval_log is not None: self.eval_log.append((layer, nb, dn))
                 if len(best) < ef or dn < -best[0][0]:
                     heapq.heappush(cand, (dn, nb))
@@ -87,25 +118,25 @@ class HNSW:
                 break
             ok = True
             for _, s in chosen:
-                if self.d(self.vecs[c], self.vecs[s]) < dist:
+                if self.distance(self.vecs[c], self.vecs[s]) < dist:
                     ok = False
                     if why is not None:
-                        why.append(f"      reject {self.nm(c)} (d={dist:.2f}): closer to {self.nm(s)}")
+                        why.append(f"      reject {self.name(c)} (d={dist:.2f}): closer to {self.name(s)}")
                     break
             if ok:
                 chosen.append((dist, c))
                 if why is not None:
-                    why.append(f"      keep   {self.nm(c)} (d={dist:.2f})")
+                    why.append(f"      keep   {self.name(c)} (d={dist:.2f})")
         return chosen
 
     # ---------- insert ----------
     def add(self, vec):
         vec = np.asarray(vec, dtype=float)
-        idx = len(self.vecs)
+        idx = len(self.vecs)      # new node id
         L = self.random_level()   # level of the new node
         calls_at_start = self.dist_calls
 
-        self.log(f"\n>>> INSERT {self.nm(idx)}  id={idx}  vec={vec.tolist()}")
+        self.log(f"\n>>> INSERT {self.name (idx)}  id={idx}  vec={vec.tolist()}")
         u, raw = self.last_draw
         self.log(f"    level draw: U={u:.5f}"
                  f"  ->  -ln(1-U)={-math.log(1 - u):.5f}"
@@ -126,39 +157,40 @@ class HNSW:
             self.graph.append({})
 
         for l in range(L + 1): # initialize empty neighbor list for the new node at each layer
-            self.log(f"    layer {l}: neighbor list initialized for {self.nm(idx)}"
+            self.log(f"    layer {l}: neighbor list initialized for {self.name(idx)}"
                      f"  (empty, cap={self.Mmax0 if l == 0 else self.M})")
             self.graph[l][idx] = []
 
         if self.entry is None:
             self.entry = idx
-            self.log(f"    index was empty -> {self.nm(idx)} becomes the entry point (no edges to build)")
-            self.log(f"<<< DONE {self.nm(idx)}: {self.dist_calls - calls_at_start} distance calls")
+            self.log(f"    index was empty -> {self.name(idx)} becomes the entry point (no edges to build)")
+            self.log(f"<<< DONE {self.name(idx)}: {self.dist_calls - calls_at_start} distance calls")
             return idx
 
-        top = self.levels[self.entry]
-        ep = [self.entry]
-        self.log(f"    entry point = {self.nm(self.entry)} (top layer {top});"
+        top = self.levels[self.entry] # the highest level of the current entry point and this is the top layer of the graph
+        self.log(f"    current entry point = {self.name(self.entry)} (top layer {top}); new node top layer = {L}") 
+        entry_point = [self.entry]
+        self.log(f"    entry point = {self.name(self.entry)} (top layer {top});"
                  f" descend layers {top}..{L + 1}, then link layers {min(top, L)}..0")
 
         # greedy descent through layers above L
         for l in range(top, L, -1):
             before = self.dist_calls
-            hit = self.search_layer(vec, ep, 1, l)[0]
-            self.log(f"    layer {l}: greedy descent {self.nm(ep[0])} -> {self.nm(hit[1])}"
+            hit = self.search_layer(vec, entry_point, 1, l)[0]
+            self.log(f"    layer {l}: greedy descent {self.name(entry_point[0])} -> {self.name(hit[1])}"
                      f"  (d={hit[0]:.3f}, {self.dist_calls - before} distance calls)")
-            ep = [hit[1]]
+            entry_point = [hit[1]]
 
         # connect on layers min(top, L) .. 0
         for l in range(min(top, L), -1, -1):
             layer_start = self.dist_calls
             Mmax = self.Mmax0 if l == 0 else self.M
             self.log(f"    layer {l}: LINKING  (Mmax={Mmax}, ef_construction={self.efC},"
-                     f" entry={[self.nm(e) for e in ep]})")
+                     f" entry={[self.name(e) for e in entry_point]})")
 
-            C = self.search_layer(vec, ep, self.efC, l)
+            C = self.search_layer(vec, entry_point, self.efC, l)
             self.log(f"      candidates ({len(C)} found in {self.dist_calls - layer_start} calls): "
-                     + (", ".join(f"{self.nm(n)}({dd:.3f})" for dd, n in C) or "(none)"))
+                     + (", ".join(f"{self.name(n)}({dd:.3f})" for dd, n in C) or "(none)"))
 
             why = [] if self.trace else None
             chosen = self.select_neighbors(vec, C, self.M, why)
@@ -166,60 +198,60 @@ class HNSW:
                 self.log(f"      heuristic (keep at most M={self.M}):")
                 self.log("\n".join("  " + w for w in why))
             self.log(f"      chosen {len(chosen)}/{len(C)}: "
-                     + (", ".join(f"{self.nm(n)}({dd:.3f})" for dd, n in chosen) or "(none)"))
+                     + (", ".join(f"{self.name(n)}({dd:.3f})" for dd, n in chosen) or "(none)"))
 
             for dd, n in chosen:
                 self.graph[l][idx].append(n)
                 self.graph[l][n].append(idx)
-                self.log(f"      edge {self.nm(idx)} <-> {self.nm(n)} (d={dd:.3f});"
-                         f" {self.nm(n)} now deg={len(self.graph[l][n])}/{Mmax}")
+                self.log(f"      edge : {self.name(idx)} <-> {self.name(n)} (d={dd:.3f});"
+                         f" {self.name(n)} now deg={len(self.graph[l][n])}/{Mmax}")
                 if len(self.graph[l][n]) > Mmax:       # prune overfull neighbor
                     nv = self.vecs[n]
                     before_deg = len(self.graph[l][n])
-                    cl = [(self.d(nv, self.vecs[x]), x) for x in self.graph[l][n]]
+                    cl = [(self.distance(nv, self.vecs[x]), x) for x in self.graph[l][n]]
                     pwhy = [] if self.trace else None
                     keep = self.select_neighbors(nv, cl, Mmax, pwhy)
                     dropped = set(self.graph[l][n]) - {x for _, x in keep}
                     self.graph[l][n] = [x for _, x in keep]
-                    self.log(f"      prune {self.nm(n)}: deg {before_deg} > Mmax={Mmax}"
-                             f" -> keep {[self.nm(x) for _, x in keep]},"
-                             f" drop {[self.nm(x) for x in dropped]}")
+                    self.log(f"      prune {self.name(n)}: deg {before_deg} > Mmax={Mmax}"
+                             f" -> keep {[self.name(x) for _, x in keep]},"
+                             f" drop {[self.name(x) for x in dropped]}")
                     if pwhy:
                         self.log("\n".join("  " + w for w in pwhy))
                     for x in dropped:                  # keep graph symmetric-ish
                         if n in self.graph[l][x]:
                             self.graph[l][x].remove(n)
-                            self.log(f"        reverse edge {self.nm(x)} -> {self.nm(n)} removed"
-                                     f" ({self.nm(x)} deg now {len(self.graph[l][x])})")
+                            self.log(f"        reverse edge {self.name(x)} -> {self.name(n)} removed"
+                                     f" ({self.name(x)} deg now {len(self.graph[l][x])})")
 
-            self.log(f"    layer {l} done: {self.nm(idx)} -> {[self.nm(n) for n in self.graph[l][idx]]}"
+            self.log(f"    layer {l} done: {self.name(idx)} -> {[self.name(n) for n in self.graph[l][idx]]}"
                      f"  (deg={len(self.graph[l][idx])}/{Mmax},"
                      f" {self.dist_calls - layer_start} distance calls on this layer)")
-            ep = [n for _, n in C]
+            entry_point = [n for _, n in C] # the best candidate from this layer becomes the entry point for the next lower layer
 
         if L > top:
             self.entry = idx
-            self.log(f"    L={L} > previous top={top} -> {self.nm(idx)} is the new entry point")
+            self.log(f"    L={L} > previous top={top} -> {self.name(idx)} is the new entry point")
         else:
-            self.log(f"    entry point unchanged: {self.nm(self.entry)} (top layer {top})")
+            self.log(f"    entry point unchanged: {self.name(self.entry)} (top layer {top})")
 
-        self.log(f"<<< DONE {self.nm(idx)}: {self.dist_calls - calls_at_start} distance calls"
+        self.log(f"<<< DONE {self.name(idx)}: {self.dist_calls - calls_at_start} distance calls"
                  f" for this insert, {self.dist_calls} total")
         return idx
 
     # ---------- query ----------
-    def search(self, q, k=5, ef=50, trace=False):
+    def search(self, q, k=5, efSearch=50, trace=False):
         q = np.asarray(q, dtype=float)
-        ep = [self.entry]
+        entry_point = [self.entry]
         for l in range(self.levels[self.entry], 0, -1):
-            ep = [self.search_layer(q, ep, 1, l)[0][1]]
+            entry_point = [self.search_layer(q, entry_point, 1, l)[0][1]]
             if trace:
-                print(f"  layer {l}: greedy -> {self.nm(ep[0])}")
-        res = self.search_layer(q, ep, max(ef, k), 0)
+                print(f"  layer {l}: greedy -> {self.name(entry_point[0])}")
+        res = self.search_layer(q, entry_point, max(efSearch, k), 0)
         return res[:k]
 
     def show(self):
         for l in range(len(self.graph) - 1, -1, -1):
             print(f"Layer {l}  ({len(self.graph[l])} nodes)")
             for n in sorted(self.graph[l]):
-                print(f"   {self.nm(n):>14} -> {[self.nm(x) for x in self.graph[l][n]]}")
+                print(f"   {self.name(n):>14} -> {[self.name(x) for x in self.graph[l][n]]}")
